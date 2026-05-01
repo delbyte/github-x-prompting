@@ -1,0 +1,32 @@
+name: Daily post drafts
+
+on:
+  schedule:
+    # 9pm IST = 15:30 UTC
+    - cron: "30 15 * * *"
+  workflow_dispatch:  # lets you trigger manually for testing
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: pip install requests
+
+      - name: Generate drafts
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+          OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
+          GH_USERNAME: delbyte
+          DRAFT_REPO: delbyte/post-drafts
+          SOURCE_REPOS: ${{ secrets.SOURCE_REPOS }}
+          MODEL: deepseek/deepseek-v3.2:free
+          FALLBACK_MODEL: openrouter/free
+        run: python generate_drafts.py
