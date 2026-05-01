@@ -24,8 +24,8 @@ jobs:
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
           OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
-          GH_USERNAME: delbyte
-          DRAFT_REPO: delbyte/post-drafts
+          GH_USERNAME: ${{ secrets.GH_USERNAME }}
+          DRAFT_REPO: ${{ secrets.DRAFT_REPO }}
           SOURCE_REPOS: ${{ secrets.SOURCE_REPOS }}
           MODEL: deepseek/deepseek-v3.2:free
           FALLBACK_MODEL: openrouter/free
