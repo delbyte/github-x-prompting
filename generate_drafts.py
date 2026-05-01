@@ -1,7 +1,11 @@
-"""
-Daily post draft generator.
+"""Daily post draft generator.
+
 Pulls recent GitHub activity, asks an LLM to suggest post angles,
 and files the drafts as a GitHub issue for review.
+
+Security/permissions invariant:
+- This script must be READ-ONLY for all repositories EXCEPT the drafts repository.
+- The only allowed write operation is: creating an issue in DRAFT_REPO.
 """
 
 import os
@@ -11,10 +15,12 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 # --- Config (read from env vars set in GitHub Actions) ---
-GITHUB_TOKEN = os.environ["GH_PAT"]  # personal access token with repo scope
+GITHUB_TOKEN = os.environ["GH_PAT"]  # personal access token
 OPENROUTER_KEY = os.environ["OPENROUTER_KEY"]
 GITHUB_USERNAME = os.environ.get("GH_USERNAME", "delbyte")
-DRAFT_REPO = os.environ.get("DRAFT_REPO", "delbyte/post-drafts")  # where issues land
+
+# Where draft issues are created (the ONLY repo this script is allowed to write to)
+DRAFT_REPO = os.environ.get("DRAFT_REPO", "delbyte/post-drafts")
 
 # Comma-separated list of repos to scan, e.g. "delbyte/myproject,hercules/platform"
 SOURCE_REPOS = [r.strip() for r in os.environ.get("SOURCE_REPOS", "").split(",") if r.strip()]
@@ -29,17 +35,32 @@ FALLBACK_MODEL = os.environ.get("FALLBACK_MODEL", "openrouter/free")
 LOOKBACK_HOURS = 24
 
 
-def fetch_recent_prs(repo: str, since: datetime) -> list[dict[str, Any]]:
-    """Get PRs that were merged or updated in the lookback window."""
-    url = f"https://api.github.com/repos/{repo}/pulls"
-    headers = {
+def _github_headers() -> dict[str, str]:
+    return {
         "Authorization": f"Bearer {GITHUB_TOKEN}",
         "Accept": "application/vnd.github+json",
     }
+
+
+def _assert_writes_only_to_draft_repo(target_repo: str) -> None:
+    """Fail closed if any code path attempts to write outside DRAFT_REPO."""
+    if target_repo.strip().lower() != DRAFT_REPO.strip().lower():
+        raise RuntimeError(
+            "Write operation blocked: attempted to write to "
+            f"'{target_repo}', but only DRAFT_REPO ('{DRAFT_REPO}') is allowed."
+        )
+
+
+def fetch_recent_prs(repo: str, since: datetime) -> list[dict[str, Any]]:
+    """Get PRs that were merged or updated in the lookback window.
+
+    READ-ONLY operation.
+    """
+    url = f"https://api.github.com/repos/{repo}/pulls"
     params = {"state": "closed", "sort": "updated", "direction": "desc", "per_page": 30}
 
     try:
-        r = requests.get(url, headers=headers, params=params, timeout=30)
+        r = requests.get(url, headers=_github_headers(), params=params, timeout=30)
         r.raise_for_status()
     except Exception as e:
         print(f"[warn] couldn't fetch {repo}: {e}")
@@ -54,32 +75,33 @@ def fetch_recent_prs(repo: str, since: datetime) -> list[dict[str, Any]]:
         merged_at = datetime.fromisoformat(pr["merged_at"].replace("Z", "+00:00"))
         if merged_at < since:
             continue
-        prs.append({
-            "repo": repo,
-            "title": pr["title"],
-            "body": (pr["body"] or "")[:500],  # cap to keep prompt small
-            "url": pr["html_url"],
-            "merged_at": pr["merged_at"],
-            "additions": pr.get("additions", 0),
-            "deletions": pr.get("deletions", 0),
-        })
+        prs.append(
+            {
+                "repo": repo,
+                "title": pr["title"],
+                "body": (pr["body"] or "")[:500],  # cap to keep prompt small
+                "url": pr["html_url"],
+                "merged_at": pr["merged_at"],
+                "additions": pr.get("additions", 0),
+                "deletions": pr.get("deletions", 0),
+            }
+        )
     return prs
 
 
 def fetch_recent_commits(repo: str, since: datetime) -> list[dict[str, Any]]:
-    """Fallback: if no PRs, look at direct commits to default branch."""
+    """Fallback: if no PRs, look at direct commits to default branch.
+
+    READ-ONLY operation.
+    """
     url = f"https://api.github.com/repos/{repo}/commits"
-    headers = {
-        "Authorization": f"Bearer {GITHUB_TOKEN}",
-        "Accept": "application/vnd.github+json",
-    }
     params = {
         "author": GITHUB_USERNAME,
         "since": since.isoformat(),
         "per_page": 20,
     }
     try:
-        r = requests.get(url, headers=headers, params=params, timeout=30)
+        r = requests.get(url, headers=_github_headers(), params=params, timeout=30)
         r.raise_for_status()
     except Exception as e:
         print(f"[warn] couldn't fetch commits for {repo}: {e}")
@@ -99,11 +121,15 @@ def fetch_recent_commits(repo: str, since: datetime) -> list[dict[str, Any]]:
 def build_prompt(activity: list[dict]) -> str:
     """Construct the prompt for the model. This is the key file to iterate on."""
     activity_summary = "\n".join(
-        f"- [{a['repo']}] {a['title']}" + (f" ({a.get('additions', 0)}+/{a.get('deletions', 0)}-)" if 'additions' in a else "")
+        f"- [{a['repo']}] {a['title']}" + (
+            f" ({a.get('additions', 0)}+/{a.get('deletions', 0)}-)" if "additions" in a else ""
+        )
         for a in activity
     )
 
-    return f"""You are helping a 19-year-old full-stack engineer named Arnav (handle: delbyte) brainstorm Twitter/X post ideas based on his recent GitHub activity. He works at an AI company but CANNOT post anything that would leak:
+    return f"""You are helping a 19-year-old full-stack engineer named Arnav (handle: delbyte) brainstorm Twitter/X post ideas based on his recent GitHub activity. He works at an AI company but must not reveal proprietary or confidential details.
+
+What he MUST NOT post:
 - proprietary code, algorithms, architecture decisions
 - unreleased features or roadmap signals
 - internal performance numbers, customer data, or business strategy
@@ -126,7 +152,7 @@ Generate exactly 3 post ideas. For each:
 3. **Draft**: a post under 280 chars, OR a short thread (2-4 tweets) if the topic genuinely needs it. Write in Arnav's voice as described above.
 4. **Risk check**: one sentence flagging any IP/confidentiality concerns to double-check before posting
 
-If the activity is too sparse or all the topics are too company-specific to safely post about, say so honestly and suggest he write about something general from his domain instead. Don't pad with weak ideas.
+If the activity is too sparse or all the topics are too company-specific to safely post about, say so honestly and suggest he write about something general from his domain instead. Don't pad with filler.
 
 Output as plain markdown, no preamble."""
 
@@ -163,17 +189,23 @@ def call_openrouter(prompt: str, model: str | None = None) -> str:
 
 
 def create_github_issue(title: str, body: str) -> str:
-    """File the drafts as an issue in the drafts repo."""
+    """File the drafts as an issue in the drafts repo.
+
+    This is the ONLY write operation in the entire script.
+    """
+    _assert_writes_only_to_draft_repo(DRAFT_REPO)
+
     url = f"https://api.github.com/repos/{DRAFT_REPO}/issues"
-    headers = {
-        "Authorization": f"Bearer {GITHUB_TOKEN}",
-        "Accept": "application/vnd.github+json",
-    }
-    r = requests.post(url, headers=headers, json={
-        "title": title,
-        "body": body,
-        "labels": ["draft"],
-    }, timeout=30)
+    r = requests.post(
+        url,
+        headers=_github_headers(),
+        json={
+            "title": title,
+            "body": body,
+            "labels": ["draft"],
+        },
+        timeout=30,
+    )
     r.raise_for_status()
     return r.json()["html_url"]
 
