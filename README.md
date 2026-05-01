@@ -32,6 +32,8 @@ Repo → Settings → Secrets and variables → Actions → New repository secre
 |------------------|-----------------------------------------------------------------------|
 | `GH_PAT`         | The personal access token from step 4                                 |
 | `OPENROUTER_KEY` | The OpenRouter key from step 3                                        |
+| `GH_USERNAME`    | Your GitHub username, e.g. `delbyte`                                  |
+| `DRAFT_REPO`     | The drafts repo from step 1, e.g. `delbyte/post-drafts`              |
 | `SOURCE_REPOS`   | Comma-separated repos to scan, e.g. `delbyte/myproject,hercules/api`  |
 
 ### 6. Test it
